@@ -72,13 +72,19 @@ POE::Session->create(
     irc_msg => \&on_public,
     #irc_disconnected => \&on_disconnect,
     irc_all => \&show_all,
-    irc_error => \&show_all,
+    irc_error => \&show_error,
     irc_notice => \&show_notice
   },
 );
 
 sub show_all {
-  print "Hey something happened\n";
+  print "Hey something happened. This code in show_all.\n";
+}
+
+sub show_error {
+  print "Hey an error happened. This code in show_error.\n";
+  #print "$_\n";
+  print Dumper(@_);
 }
 
 sub show_notice {
@@ -117,11 +123,16 @@ sub on_public {
   my $nick    = (split /!/, $who)[0];
   my $channel = $where->[0];
   print "[$ts] <$channel:$nick> $msg\n";
+  my $aliased = 0;
   foreach my $imply_command (@{$settings->{'implied_command'}}) {
     my $regex = $imply_command->{'regex'};
     my $command = $imply_command->{'command'};
     if (my (@result_data) = $msg =~ $regex) {
       if (test_for_sub($command)) {
+        if (substr($msg,0,5) eq "!8ball") {
+          print "Looks like an aliased command: $command\n";
+          $aliased = 1;
+        }
         my $sub = \&{$command};
         my $response = $sub->($nick, $msg, $settings);
         if(exists($response->{'public'})) {
@@ -130,6 +141,13 @@ sub on_public {
         if(exists($response->{'private'})) {
           print $response->{'private'};
           $irc->yield(privmsg=>$nick, $response->{'private'});
+        }
+        if (exists($response->{'action'})) {
+          print "Action triggered: " . $response->{'action'};
+          $irc->yield(ctcp => $where => "ACTION " . $response->{'action'});
+        }
+        if (exists($response->{'error'})) {
+	  print "Error response: " . $response->{'error'};
         }
       } elsif (-e $command . "_botmod.pl") {
         print "Loading new module: $command\n";
@@ -145,25 +163,39 @@ sub on_public {
           print $response->{'private'};
           $irc->yield(privmsg=>$nick, $response->{'private'});
         }
+        if(exists($response->{'error'})) {
+          print "Error response: " . $response->{'error'};
+        }
       } else {
         print "Matched on regex /" . $regex . "/ but no matching module file " . $command . "_botmod.pl\n";
       }
     }
   }
   my $cmd_regex = "^".$command_char."(.+)";
-  if (my ($is_command) = $msg =~ $cmd_regex) {    #/^\!(.+)/) # deleted curly brace needs replacing!
+  if ((my ($is_command) = $msg =~ $cmd_regex) && ($aliased == 0)) {    #/^\!(.+)/) # deleted curly brace needs replacing!
     # This is our command prefix, so from here we check if the command exists
-    my ($command, $params) = $msg =~ /!(\w+) (.+)/;
+    my ($command, $params);
+    if ($msg =~ / /) {
+      ($command, $params) = $msg =~ /!(\w+) (.+)/;
+    } else {
+      $command = substr($msg,1);
+      $params = "";
+    }
+    if (!defined($params)) { $params = ""; }
     # 1. If the command is already loaded, execute it.
     if (test_for_sub($command)) {
       eval {
         my $sub = \&{$command};
-        my $response = $sub->($nick, $params, $settings, );
+        my $response = $sub->($nick, $params, $settings);
         if(exists($response->{'public'})) {
           $irc->yield(privmsg=>$where, $response->{'public'});
         }
         if(exists($response->{'private'})) {
           print $response->['private'];
+        }
+        if (exists($response->{'action'})) {
+          print "Action triggered: " . $response->{'action'};
+          $irc->yield(ctcp => $where => "ACTION " . $response->{'action'});
         }
       }
     } else {
@@ -181,12 +213,26 @@ sub on_public {
         if(exists($response->{'private'})) {
           print $response->['private'];
         }
+        if (exists($response->{'action'})) {
+          print "Action triggered: " . $response->{'action'};
+          $irc->yield(ctcp => $where => "ACTION " . $response->{'action'});
+        }
+
       } else {
     # 3. Complain about a non-command
         $irc->yield(privmsg=>$nick, "I don't know the trick \"$command\"");
       }
     }
   }
+}
+
+sub on_ctcp_action {
+  my $ts = scalar localtime;   # for logging
+  my ($kernel, $who, $where, $msg) = @_[KERNEL, ARG0, ARG1, ARG2];
+  my $nick    = (split /!/, $who)[0];
+  my $channel = $where->[0];
+
+  print "[$ts] <$channel> $nick $msg\n";
 }
 
 $poe_kernel->run();
